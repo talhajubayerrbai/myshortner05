@@ -1,0 +1,10 @@
+# udap:meta cloud=aws region=us-east-1 target=ec2
+
+user: User { shape: person; udap-type: generic.user }
+vpc: VPC {
+  web: EC2 App Server { shape: rectangle; udap-type: aws.ec2 }
+  rds: RDS Postgres { shape: cylinder; udap-type: aws.rds }
+}
+
+user -> vpc.web: HTTP :8000
+vpc.web -> vpc.rds: SQL :5432

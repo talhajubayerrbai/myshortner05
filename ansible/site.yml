@@ -1,0 +1,144 @@
+---
+- name: Configure URL Shortener app server
+  hosts: app
+  become: true
+  gather_facts: true
+
+  vars:
+    app_dir: /opt/shortener
+    venv_dir: /opt/shortener/venv
+    app_user: shortener
+    app_port: 8000
+
+  pre_tasks:
+    - name: Wait for apt lock to release
+      ansible.builtin.shell: |
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 3; done
+      changed_when: false
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+  tasks:
+    # ── System packages ───────────────────────────────────────────────────────
+    - name: Install Python 3.11 and dependencies
+      ansible.builtin.apt:
+        name:
+          - python3.11
+          - python3.11-venv
+          - python3-pip
+          - libpq-dev
+          - gcc
+          - git
+        state: present
+
+    # ── App user ──────────────────────────────────────────────────────────────
+    - name: Create app user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ app_dir }}"
+        create_home: false
+
+    # ── App directory ─────────────────────────────────────────────────────────
+    - name: Create app directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    # ── Copy application code ─────────────────────────────────────────────────
+    - name: Synchronise application code
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "{{ app_dir }}/"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=infra"
+          - "--exclude=ansible"
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+          - "--exclude=.env"
+      notify: Restart shortener
+
+    - name: Set ownership on app directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        recurse: true
+
+    # ── Virtual environment ───────────────────────────────────────────────────
+    - name: Create Python virtual environment
+      ansible.builtin.command:
+        cmd: python3.11 -m venv {{ venv_dir }}
+        creates: "{{ venv_dir }}/bin/activate"
+
+    - name: Install Python dependencies
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ venv_dir }}"
+        virtualenv_python: python3.11
+      notify: Restart shortener
+
+    # ── Environment file ──────────────────────────────────────────────────────
+    - name: Write .env file
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0600"
+      no_log: true
+      notify: Restart shortener
+
+    # ── Database migrations ───────────────────────────────────────────────────
+    - name: Run Alembic migrations
+      ansible.builtin.command:
+        cmd: "{{ venv_dir }}/bin/alembic upgrade head"
+        chdir: "{{ app_dir }}"
+      environment:
+        DATABASE_URL: "postgresql://shortener:{{ lookup('env', 'DB_PASSWORD') }}@{{ lookup('env', 'RDS_ENDPOINT') }}:5432/shortener?sslmode=require"
+      changed_when: true
+
+    # ── Systemd service ───────────────────────────────────────────────────────
+    - name: Install systemd service unit
+      ansible.builtin.template:
+        src: shortener.service.j2
+        dest: /etc/systemd/system/shortener.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart shortener
+
+    - name: Enable and start shortener service
+      ansible.builtin.systemd:
+        name: shortener
+        enabled: true
+        state: started
+
+    - name: Flush handlers before health check
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for app port
+      ansible.builtin.wait_for:
+        port: "{{ app_port }}"
+        host: "127.0.0.1"
+        timeout: 60
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart shortener
+      ansible.builtin.systemd:
+        name: shortener
+        state: restarted
