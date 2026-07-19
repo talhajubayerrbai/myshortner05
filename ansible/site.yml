@@ -32,6 +32,7 @@
           - libpq-dev
           - gcc
           - git
+          - rsync
         state: present
 
     # ── App user ──────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@
         mode: "0755"
 
     # ── Copy application code ─────────────────────────────────────────────────
-    - name: Synchronise application code
+    - name: Copy application code
       ansible.posix.synchronize:
         src: "{{ playbook_dir }}/../"
         dest: "{{ app_dir }}/"
